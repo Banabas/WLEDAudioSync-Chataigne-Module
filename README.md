@@ -325,3 +325,18 @@ for ESP8266, old SR WLED fw version required : 0.13.0b3 https://wled-install.git
 Port to the 0.14.xx version is on TO DO list...
 
 On 27/10/2024: WLED Beta 0.15.0b6 (160) include the Audio Reactive userModule, so now ESP8266 can act as UDP sync receiver for the audio.
+
+---
+
+## ***Changes in 2.2.0 (WLED 0.15 sync)***
+
+Checked against `usermods/audioreactive` of WLED 0.15.0 and current `main` (V2 packet: 44 bytes, header `00002`).
+
+- **sampleSmth is now really smoothed** (same filter as WLED: average over the last 16 samples). Before, sampleRaw and sampleSmth carried the same value, so effects using `volumeSmth` were jittery.
+- **Values clamped to WLED ranges**: volume 0..255, fftResult 0..254 (rounded), FFT_MajorPeak 1..11025 Hz. Before, high multipliers could overflow the FFT bytes and wrap around.
+- **New samplePeak detection** – parameter *Peak Source*:
+  - *Bass onset* (default): peak when the bass bands jump above their average (min. 100 ms apart, like WLED). Tune with *Peak Sensitivity*.
+  - *Beat (aubio)*: one peak per beat received via OSC (needs *Use BPM*).
+  - *Pitch (legacy)*: old behaviour (any detected pitch = peak, almost always on).
+- **V1 packet fix**: `sampleAgc` / `sampleRaw` are now sent as int32 as WLED expects (were float bytes, decoded by WLED as huge integers).
+- V1 and V2 are built from the same per-frame values.

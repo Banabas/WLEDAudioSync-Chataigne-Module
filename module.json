@@ -2,7 +2,7 @@
 	"name": "WLEDAudioSync",
 	"type": "UDP",
 	"path": "Protocol",
-	"version": "2.1.1",
+	"version": "2.2.0",
 	"description": "Stream Sound data to your WLED Sound Reactive",
 	"url":"",
 	"downloadURL": "",
@@ -86,6 +86,28 @@
 			"default": 254,
 			"min":0,
 			"max":2540
+		},
+		"Peak Source": {
+			"type": "Enum",
+			"description": "How samplePeak is detected (used by WLED peak effects like Puddlepeak, Ripplepeak, Waterfall).
+	Bass onset : bass bands jump above their average (like WLED itself).
+	Beat (aubio) : one peak per beat, needs 'Use BPM' in Beat Params.
+	Pitch (legacy) : any detected pitch, behaviour of version 2.1.1",
+			"readOnly": false,
+			"options" : {
+					"Bass onset":0,
+					"Beat (aubio)":1,
+					"Pitch (legacy)":2
+			},
+			"default":"Bass onset"
+		},
+		"Peak Sensitivity": {
+			"type": "Float",
+			"description": "Bass onset only : how far the bass level must jump above its average to trigger a peak.
+	Lower = more peaks",
+			"default": 1.5,
+			"min": 1.05,
+			"max": 4
 		},
 		"Take Snapshot": {
 			"type": "Trigger",

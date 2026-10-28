@@ -128,6 +128,13 @@ var FREQTABLE = [];
 // samplePeak
 var wledPeak = 0;
 
+// WLED 0.15 : smoothed volume (sampleSmth / volumeSmth), same filter as WLED : avg over last 16 samples
+var wledSmth = 0;
+// WLED 0.15 : bass onset peak detection
+var bassAvg = 0;
+var lastPeakTime = 0;
+var lastBeatValue = false;
+
 // Wled Freq/Mag
 var wledFreq = 0;
 var wledMag = 0;
@@ -681,6 +688,8 @@ function moduleValueChanged(param)
 // send audio data with optional delay
 function sendAudio(replay)
 {
+	// new frame : packet values are recomputed once and shared by V1 / V2
+	pktFrame += 1;
 	// translate audio data to UDP message
 	var udpdataV1 = udpAudioSyncV1(replay);
 	
@@ -1333,8 +1342,6 @@ struct audioSyncPacket {
 	
 		// sampleRaw 4 Bytes
 		wledVol = root.modules.soundCard.values.volume.get()*volMultiplier;
-		// samplePeak
-		wledPeak = root.modules.soundCard.values.pitchDetection.pitch.get();	
 		
 		// Calculate FFT Data
 		// Freq value
@@ -1370,7 +1377,10 @@ struct audioSyncPacket {
 		wledMag = fftSoundMaxFreqMagnitude;
 		// FFT Max Freq 8 bytes
 		wledFreq = fftSoundMaxFreqIndex;
-		
+
+		// samplePeak (0/1, or pitch value in legacy mode)
+		wledPeak = detectPeak();
+
 	} else if (replay === false  && local.parameters.live.get() == 0) {
 		
 		// set audio data
@@ -1387,23 +1397,18 @@ struct audioSyncPacket {
 	}
 	
 	//
-	// create UDP data 
+	// create UDP data (values normalised to the ranges WLED 0.15 expects)
 	//
-	var intArray = createIntArray(util.floatToHexSeq(wledVol,true));
-	
-	if (wledPeak !=0)
-	{
-		var samplePeak = 1;
-		
-	} else {
-		
-		var samplePeak = 0;
-	}
+	var pkt = wledPacketValues();
 
-	var fftMagArray = createIntArray(util.doubleToHexSeq(wledMag,true));
-	var fftFreqArray = createIntArray(util.doubleToHexSeq(wledFreq,true));
-	
-	// Header v1
+	var fftMagArray = createIntArray(util.doubleToHexSeq(pkt.mag,true));
+	var fftFreqArray = createIntArray(util.doubleToHexSeq(pkt.freq,true));
+	var avgArray = createIntArray(util.floatToHexSeq(pkt.smth,true));
+	var agcArray = int32ToBytesLE(pkt.smth);
+	var rawArray = int32ToBytesLE(pkt.raw);
+	var volByte = clampValue(Math.round(pkt.raw), 0, 255);
+
+	// Header v1 "00001"
 	UDP_AUDIO_SYNC[0] = 48;
 	UDP_AUDIO_SYNC[1] = 48;
 	UDP_AUDIO_SYNC[2] = 48;
@@ -1411,108 +1416,45 @@ struct audioSyncPacket {
 	UDP_AUDIO_SYNC[4] = 49;
 	UDP_AUDIO_SYNC[5] = 0;
 	// uint8_t myVals[32];
-	// Used to store a pile of samples because WLED frame rate and WLED sample rate are not synchronized. Frame rate is too low.
-	UDP_AUDIO_SYNC[6] = wledVol;
-	UDP_AUDIO_SYNC[7] = wledVol;
-	UDP_AUDIO_SYNC[8] = wledVol;
-	UDP_AUDIO_SYNC[9] = wledVol;
-	UDP_AUDIO_SYNC[10] = wledVol;
-	UDP_AUDIO_SYNC[11] = wledVol;
-	UDP_AUDIO_SYNC[12] = wledVol;
-	UDP_AUDIO_SYNC[13] = wledVol;
-	UDP_AUDIO_SYNC[14] = wledVol;
-	UDP_AUDIO_SYNC[15] = wledVol;
-	UDP_AUDIO_SYNC[16] = wledVol;
-	UDP_AUDIO_SYNC[17] = wledVol;
-	UDP_AUDIO_SYNC[18] = wledVol;
-	UDP_AUDIO_SYNC[19] = wledVol;
-	UDP_AUDIO_SYNC[20] = wledVol;
-	UDP_AUDIO_SYNC[21] = wledVol;
-	UDP_AUDIO_SYNC[22] = wledVol;
-	UDP_AUDIO_SYNC[23] = wledVol;
-	UDP_AUDIO_SYNC[24] = wledVol;
-	UDP_AUDIO_SYNC[25] = wledVol;
-	UDP_AUDIO_SYNC[26] = wledVol;
-	UDP_AUDIO_SYNC[27] = wledVol;
-	UDP_AUDIO_SYNC[28] = wledVol;
-	UDP_AUDIO_SYNC[29] = wledVol;
-	UDP_AUDIO_SYNC[30] = wledVol;
-	UDP_AUDIO_SYNC[31] = wledVol;
-	UDP_AUDIO_SYNC[32] = wledVol;
-	UDP_AUDIO_SYNC[33] = wledVol;
-	UDP_AUDIO_SYNC[34] = wledVol;
-	UDP_AUDIO_SYNC[35] = wledVol;
-	UDP_AUDIO_SYNC[36] = wledVol;
-	UDP_AUDIO_SYNC[37] = wledVol;
+	// Used to store a pile of samples because WLED frame rate and WLED sample rate are not synchronized.
+	for (var i = 6; i < 38; i += 1)
+	{
+		UDP_AUDIO_SYNC[i] = volByte;
+	}
 	// Filler
 	UDP_AUDIO_SYNC[38] = 0;
-	UDP_AUDIO_SYNC[39] = 0;	
-	// int sampleAgc;          //  04 Bytes
- 	// volumeSmth   = fmaxf(receivedPacket->sampleSmth, 0.0f);
-	UDP_AUDIO_SYNC[40] = intArray[3];
-	UDP_AUDIO_SYNC[41] = intArray[2];
-	UDP_AUDIO_SYNC[42] = intArray[1];
-	UDP_AUDIO_SYNC[43] = intArray[0];
-	//  int sampleRaw;          //  04 Bytes
-	// fmaxf(receivedPacket->sampleRaw, 0.0f);
-	UDP_AUDIO_SYNC[44] = intArray[3];
-	UDP_AUDIO_SYNC[45] = intArray[2];
-	UDP_AUDIO_SYNC[46] = intArray[1];
-	UDP_AUDIO_SYNC[47] = intArray[0];
+	UDP_AUDIO_SYNC[39] = 0;
+	// int sampleAgc;          //  04 Bytes  (int32, little endian) -> volumeSmth on receiver
+	// int sampleRaw;          //  04 Bytes  (int32, little endian)
+	for (var i = 0; i < 4; i += 1)
+	{
+		UDP_AUDIO_SYNC[40 + i] = agcArray[i];
+		UDP_AUDIO_SYNC[44 + i] = rawArray[i];
+	}
 	// float sampleAvg;        //  04 Bytes
-	// volumeSmth   = fmaxf(receivedPacket->sampleSmth, 0.0f);
-	UDP_AUDIO_SYNC[48] = intArray[3];
-	UDP_AUDIO_SYNC[49] = intArray[2];
-	UDP_AUDIO_SYNC[50] = intArray[1];
-	UDP_AUDIO_SYNC[51] = intArray[0];
-	//   bool samplePeak;        //  01 Bytes
-	// Boolean flag for peak. Responding routine must reset this flag
-  	UDP_AUDIO_SYNC[52] = samplePeak;
-	//   uint8_t fftResult[16];  //  16 Bytes - FFT results, one byte per GEQ channel 
-	UDP_AUDIO_SYNC[53] = FFTWLED[0];
-	UDP_AUDIO_SYNC[54] = FFTWLED[1];
-	UDP_AUDIO_SYNC[55] = FFTWLED[2];
-	UDP_AUDIO_SYNC[56] = FFTWLED[3];
-	UDP_AUDIO_SYNC[57] = FFTWLED[4];
-	UDP_AUDIO_SYNC[58] = FFTWLED[5];
-	UDP_AUDIO_SYNC[59] = FFTWLED[6];
-	UDP_AUDIO_SYNC[60] = FFTWLED[7];
-	UDP_AUDIO_SYNC[61] = FFTWLED[8];
-	UDP_AUDIO_SYNC[62] = FFTWLED[9];
-	UDP_AUDIO_SYNC[63] = FFTWLED[10];
-	UDP_AUDIO_SYNC[64] = FFTWLED[11];
-	UDP_AUDIO_SYNC[65] = FFTWLED[12];
-	UDP_AUDIO_SYNC[66] = FFTWLED[13];
-	UDP_AUDIO_SYNC[67] = FFTWLED[14];
-	UDP_AUDIO_SYNC[68] = FFTWLED[15];
+	UDP_AUDIO_SYNC[48] = avgArray[3];
+	UDP_AUDIO_SYNC[49] = avgArray[2];
+	UDP_AUDIO_SYNC[50] = avgArray[1];
+	UDP_AUDIO_SYNC[51] = avgArray[0];
+	// bool samplePeak;        //  01 Bytes
+	UDP_AUDIO_SYNC[52] = pkt.peak;
+	// uint8_t fftResult[16];  //  16 Bytes - one byte per GEQ channel, 0..254
+	for (var i = 0; i < 16; i += 1)
+	{
+		UDP_AUDIO_SYNC[53 + i] = pkt.fft[i];
+	}
 	// Filler
-	UDP_AUDIO_SYNC[69] = 0;	
-	UDP_AUDIO_SYNC[70] = 0;	
-	UDP_AUDIO_SYNC[71] = 0;	
-	//   double FFT_Magnitude;   //  08 Bytes
-	// float FFT_Magnitude = 0.0f;   // FFT: volume (magnitude) of peak frequency
-	// my_magnitude  = fmaxf(receivedPacket->FFT_Magnitude, 0.0f);
-	UDP_AUDIO_SYNC[72] = fftMagArray[7];
-	UDP_AUDIO_SYNC[73] = fftMagArray[6];
-	UDP_AUDIO_SYNC[74] = fftMagArray[5];
-	UDP_AUDIO_SYNC[75] = fftMagArray[4];
-	UDP_AUDIO_SYNC[76] = fftMagArray[3];
-	UDP_AUDIO_SYNC[77] = fftMagArray[2];
-	UDP_AUDIO_SYNC[78] = fftMagArray[1];
-	UDP_AUDIO_SYNC[79] = fftMagArray[0];
-	//  double FFT_MajorPeak;   //  08 Bytes
-	// float FFT_MajorPeak = 1.0f;   // FFT: strongest (peak) frequency
-	// FFT_MajorPeak = constrain(receivedPacket->FFT_MajorPeak, 1.0f, 11025.0f);  // restrict value to range expected by effects
-	UDP_AUDIO_SYNC[80] = fftFreqArray[7];
-	UDP_AUDIO_SYNC[81] = fftFreqArray[6];
-	UDP_AUDIO_SYNC[82] = fftFreqArray[5];
-	UDP_AUDIO_SYNC[83] = fftFreqArray[4];
-	UDP_AUDIO_SYNC[84] = fftFreqArray[3];
-	UDP_AUDIO_SYNC[85] = fftFreqArray[2];
-	UDP_AUDIO_SYNC[86] = fftFreqArray[1];
-	UDP_AUDIO_SYNC[87] = fftFreqArray[0];
-	
-	
+	UDP_AUDIO_SYNC[69] = 0;
+	UDP_AUDIO_SYNC[70] = 0;
+	UDP_AUDIO_SYNC[71] = 0;
+	// double FFT_Magnitude;   //  08 Bytes
+	// double FFT_MajorPeak;   //  08 Bytes
+	for (var i = 0; i < 8; i += 1)
+	{
+		UDP_AUDIO_SYNC[72 + i] = fftMagArray[7 - i];
+		UDP_AUDIO_SYNC[80 + i] = fftFreqArray[7 - i];
+	}
+
 return UDP_AUDIO_SYNC;
 }
 
@@ -1520,82 +1462,156 @@ return UDP_AUDIO_SYNC;
 function udpAudioSyncV2(udpdataV1)
 {
 /*
-  // new "V2" audiosync struct - 40 bytes - from WLED 0.14xx
-  
-  struct audioSyncPacket {
-  char    header[6];      //  06 Bytes
-  float   sampleRaw;      //  04 Bytes  - either "sampleRaw" or "rawSampleAgc" depending on soundAgc setting
-  float   sampleSmth;     //  04 Bytes  - either "sampleAvg" or "sampleAgc" depending on soundAgc setting
-  uint8_t samplePeak;     //  01 Bytes  - 0 no peak; >=1 peak detected. In future, this will also provide peak Magnitude
-  uint8_t reserved1;      //  01 Bytes  - for future extensions - not used yet
-  uint8_t fftResult[16];  //  16 Bytes
-  float  FFT_Magnitude;   //  04 Bytes
-  float  FFT_MajorPeak;   //  04 Bytes
-  
+  // "V2" audiosync struct - 44 bytes - WLED 0.14 / 0.15 / main (usermods/audioreactive)
+
+  struct __attribute__ ((packed)) audioSyncPacket {
+  char    header[6];      //  06 Bytes  offset 0   "00002"
+  uint8_t reserved1[2];   //  02 Bytes  offset 6
+  float   sampleRaw;      //  04 Bytes  offset 8   -> volumeRaw   (0..255)
+  float   sampleSmth;     //  04 Bytes  offset 12  -> volumeSmth  (0..255)
+  uint8_t samplePeak;     //  01 Bytes  offset 16  0 no peak; >=1 peak detected
+  uint8_t reserved2;      //  01 Bytes  offset 17
+  uint8_t fftResult[16];  //  16 Bytes  offset 18  (0..254)
+  uint16_t reserved3;     //  02 Bytes  offset 34
+  float  FFT_Magnitude;   //  04 Bytes  offset 36
+  float  FFT_MajorPeak;   //  04 Bytes  offset 40  (receiver constrains to 1..11025 Hz)
+  };
+
+  The receiver only accepts the packet if its size is exactly 44 bytes.
 */
 
-	// FFT Magnitude 4 bytes
-	var fftMagArray = createIntArray(util.floatToHexSeq(wledMag,true));
-	
-	// FFT Max Freq 4 bytes
-	var fftFreqArray = createIntArray(util.floatToHexSeq(wledFreq,true));	
-	
-	// Header
+	var pkt = wledPacketValues();
+
+	var rawArray = createIntArray(util.floatToHexSeq(pkt.raw,true));
+	var smthArray = createIntArray(util.floatToHexSeq(pkt.smth,true));
+	var fftMagArray = createIntArray(util.floatToHexSeq(pkt.mag,true));
+	var fftFreqArray = createIntArray(util.floatToHexSeq(pkt.freq,true));
+
+	// Header "00002"
 	UDP_AUDIO_SYNC_V2[0] = 48;
 	UDP_AUDIO_SYNC_V2[1] = 48;
 	UDP_AUDIO_SYNC_V2[2] = 48;
 	UDP_AUDIO_SYNC_V2[3] = 48;
 	UDP_AUDIO_SYNC_V2[4] = 50;
 	UDP_AUDIO_SYNC_V2[5] = 0;
-	// Filler
+	// reserved1
 	UDP_AUDIO_SYNC_V2[6] = 0;
 	UDP_AUDIO_SYNC_V2[7] = 0;
-	// sampleRaw
-	UDP_AUDIO_SYNC_V2[8] = udpdataV1[44];
-	UDP_AUDIO_SYNC_V2[9] = udpdataV1[45];
-	UDP_AUDIO_SYNC_V2[10] = udpdataV1[46];
-	UDP_AUDIO_SYNC_V2[11] = udpdataV1[47];
-	// sampleSmth
-	UDP_AUDIO_SYNC_V2[12] = udpdataV1[44];
-	UDP_AUDIO_SYNC_V2[13] = udpdataV1[45];
-	UDP_AUDIO_SYNC_V2[14] = udpdataV1[46];
-	UDP_AUDIO_SYNC_V2[15] = udpdataV1[47];
+	for (var i = 0; i < 4; i += 1)
+	{
+		// sampleRaw / sampleSmth / FFT_Magnitude / FFT_MajorPeak (float, little endian)
+		UDP_AUDIO_SYNC_V2[8 + i] = rawArray[3 - i];
+		UDP_AUDIO_SYNC_V2[12 + i] = smthArray[3 - i];
+		UDP_AUDIO_SYNC_V2[36 + i] = fftMagArray[3 - i];
+		UDP_AUDIO_SYNC_V2[40 + i] = fftFreqArray[3 - i];
+	}
 	// samplePeak
-	UDP_AUDIO_SYNC_V2[16] = udpdataV1[52];
-	//for future extensions - not used yet
+	UDP_AUDIO_SYNC_V2[16] = pkt.peak;
+	// reserved2
 	UDP_AUDIO_SYNC_V2[17] = 0;
-	// FFT
-	UDP_AUDIO_SYNC_V2[18] = udpdataV1[53];
-	UDP_AUDIO_SYNC_V2[19] = udpdataV1[54];
-	UDP_AUDIO_SYNC_V2[20] = udpdataV1[55];
-	UDP_AUDIO_SYNC_V2[21] = udpdataV1[56];
-	UDP_AUDIO_SYNC_V2[22] = udpdataV1[57];
-	UDP_AUDIO_SYNC_V2[23] = udpdataV1[58];
-	UDP_AUDIO_SYNC_V2[24] = udpdataV1[59];
-	UDP_AUDIO_SYNC_V2[25] = udpdataV1[60];
-	UDP_AUDIO_SYNC_V2[26] = udpdataV1[61];
-	UDP_AUDIO_SYNC_V2[27] = udpdataV1[62];
-	UDP_AUDIO_SYNC_V2[28] = udpdataV1[63];
-	UDP_AUDIO_SYNC_V2[29] = udpdataV1[64];
-	UDP_AUDIO_SYNC_V2[30] = udpdataV1[65];
-	UDP_AUDIO_SYNC_V2[31] = udpdataV1[66];
-	UDP_AUDIO_SYNC_V2[32] = udpdataV1[67];
-	UDP_AUDIO_SYNC_V2[33] = udpdataV1[68];
-	// Filler
+	// fftResult
+	for (var i = 0; i < 16; i += 1)
+	{
+		UDP_AUDIO_SYNC_V2[18 + i] = pkt.fft[i];
+	}
+	// reserved3
 	UDP_AUDIO_SYNC_V2[34] = 0;
-	UDP_AUDIO_SYNC_V2[35] = 0;	
-	// FFT_Magnitude
-	UDP_AUDIO_SYNC_V2[36] = fftMagArray[3];
-	UDP_AUDIO_SYNC_V2[37] = fftMagArray[2];
-	UDP_AUDIO_SYNC_V2[38] = fftMagArray[1];
-	UDP_AUDIO_SYNC_V2[39] = fftMagArray[0];
-	// FFT_MajorPeak
-	UDP_AUDIO_SYNC_V2[40] = fftFreqArray[3];
-	UDP_AUDIO_SYNC_V2[41] = fftFreqArray[2];
-	UDP_AUDIO_SYNC_V2[42] = fftFreqArray[1];
-	UDP_AUDIO_SYNC_V2[43] = fftFreqArray[0];
+	UDP_AUDIO_SYNC_V2[35] = 0;
 
 return UDP_AUDIO_SYNC_V2;
+}
+
+/*
+
+WLED 0.15 helpers
+
+*/
+
+// Values for both packet versions, clamped to the ranges WLED 0.15 uses internally.
+// Computed once per frame (cached), so V1 and V2 send identical data and smoothing advances once.
+var pktCache = null;
+var pktCacheFrame = -1;
+var pktFrame = 0;
+
+function wledPacketValues()
+{
+	if (pktCache !== null && pktCacheFrame == pktFrame)
+	{
+		return pktCache;
+	}
+
+	var raw = clampValue(wledVol, 0, 255);
+	// same smoothing as WLED getSample() : sampleAvg = ((sampleAvg * 15) + sampleAdj) / 16
+	wledSmth = ((wledSmth * 15.0) + raw) / 16.0;
+	if (wledSmth < 0.01) { wledSmth = 0; }
+
+	var fft = [];
+	for (var i = 0; i < 16; i += 1)
+	{
+		fft[i] = clampValue(Math.round(FFTWLED[i]), 0, 254);
+	}
+
+	var peak = 0;
+	if (wledPeak != 0) { peak = 1; }
+
+	var freq = clampValue(wledFreq, 1, 11025);
+	var mag = clampValue(wledMag, 0, 1000000);
+
+	pktCache = { "raw": raw, "smth": wledSmth, "peak": peak, "fft": fft, "mag": mag, "freq": freq };
+	pktCacheFrame = pktFrame;
+	return pktCache;
+}
+
+// samplePeak source, selected by the "Peak Source" parameter
+//  0 = Bass onset : bass bands jump above their running average (like WLED's own detector, min 100 ms apart)
+//  1 = Beat (aubio) : one peak per beat received via OSC (needs "Use BPM"), falls back to bass onset otherwise
+//  2 = Pitch (legacy) : any detected pitch is a peak (behaviour of module <= 2.1.1)
+function detectPeak()
+{
+	var source = local.parameters.peakSource.get();
+
+	if (source == 2)
+	{
+		return root.modules.soundCard.values.pitchDetection.pitch.get();
+	}
+
+	if (source == 1 && local.parameters.beatParams.useBPM.get() == 1)
+	{
+		var beat = local.values.beat.get();
+		if (beat != lastBeatValue)
+		{
+			lastBeatValue = beat;
+			return 1;
+		}
+		return 0;
+	}
+
+	// bass onset
+	var bass = Math.max(clampValue(FFTWLED[0], 0, 255), clampValue(FFTWLED[1], 0, 255));
+	var now = util.getTime();
+	var peak = 0;
+	if (bass > 32 &&
+		bass > bassAvg * local.parameters.peakSensitivity.get() &&
+		(now - lastPeakTime) > 0.1)
+	{
+		peak = 1;
+		lastPeakTime = now;
+	}
+	bassAvg = (bassAvg * 0.9) + (bass * 0.1);
+	return peak;
+}
+
+function clampValue(value, min, max)
+{
+	return Math.min(Math.max(value, min), max);
+}
+
+// int32 little endian byte array (for V1 "int" fields)
+function int32ToBytesLE(value)
+{
+	var v = Math.round(value);
+	if (v < 0) { v = 0; }
+	return [v % 256, Math.floor(v / 256) % 256, Math.floor(v / 65536) % 256, Math.floor(v / 16777216) % 256];
 }
 
 /*
